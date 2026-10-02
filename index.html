@@ -60,6 +60,10 @@ input:focus { outline: none; border-color: var(--accent); }
 .btn[disabled] { opacity: .5; cursor: default; }
 .small { font-size: .85rem; color: var(--muted); margin: 0; }
 .err { color: var(--them); font-weight: 600; margin: 0; }
+.check { display: flex; align-items: center; gap: 8px; flex-basis: 100%; font-size: .9rem; color: var(--muted); cursor: pointer; }
+.check input { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
+.privacy summary { cursor: pointer; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.privacy ul { margin: 4px 0 0; padding-left: 1.2em; display: grid; gap: 8px; color: var(--muted); font-size: .92rem; max-width: 68ch; }
 .signedin { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; justify-content: space-between; }
 
 .tag { display: inline-flex; align-items: center; gap: 6px; font: 500 .7rem/1 var(--mono); letter-spacing: .03em; padding: 6px 8px; border-radius: 6px; white-space: nowrap; }
@@ -116,13 +120,17 @@ input:focus { outline: none; border-color: var(--accent); }
         <div class="field"><label class="label" for="loginId">Your handle</label><input id="loginId" placeholder="you.bsky.social" spellcheck="false" autocapitalize="none" required></div>
         <div class="field"><label class="label" for="loginPw">App password</label><input id="loginPw" type="password" placeholder="xxxx-xxxx-xxxx-xxxx" autocomplete="off" required></div>
         <button class="btn" id="loginBtn" type="submit">Sign in</button>
+        <label class="check" for="remember"><input id="remember" type="checkbox" checked> Keep me signed in on this browser</label>
       </form>
-      <p class="small" style="margin-top:10px">Signing in lets the inspector see your own blocks. Use an <a href="https://bsky.app/settings/app-passwords" target="_blank" rel="noopener">app password</a>, not your main password. It goes only to your own Bluesky server and is not stored. Without signing in, only blocks between other people can be explained.</p>
+      <p class="small" style="margin-top:10px">Signing in lets the inspector see your own blocks. Use an <a href="https://bsky.app/settings/app-passwords" target="_blank" rel="noopener">app password</a>, not your main password. Without signing in, only blocks between other people can be explained. On a shared computer, untick "Keep me signed in".</p>
       <p class="err" id="loginErr" hidden></p>
     </div>
-    <div id="signedIn" class="signedin" hidden>
-      <span>Signed in as <b id="meHandle"></b></span>
-      <button class="btn alt" id="logoutBtn" type="button">Sign out</button>
+    <div id="signedIn" hidden>
+      <div class="signedin">
+        <span>Signed in as <b id="meHandle"></b></span>
+        <button class="btn alt" id="logoutBtn" type="button">Sign out</button>
+      </div>
+      <p class="small" id="keptNote" style="margin-top:6px"></p>
     </div>
   </section>
 
@@ -146,6 +154,18 @@ input:focus { outline: none; border-color: var(--accent); }
       <div><span class="tag t-gone">Unavailable</span><p>Deleted, or from an account that is deactivated or taken down.</p></div>
     </section>
   </main>
+
+  <details class="panel privacy" id="privacy">
+    <summary><span class="label">Privacy</span> <b>This page collects no data</b></summary>
+    <ul>
+      <li>Thread Inspector has no server, database, analytics or tracking. It is a single web page that runs entirely in your browser.</li>
+      <li>Your app password is sent once, directly to your own Bluesky server, to sign in. It is never saved, by this page or anywhere else.</li>
+      <li>To keep you signed in, your browser stores the sign-in tokens Bluesky issues. They stay on this device and are only ever sent back to Bluesky. "Sign out" deletes them and tells Bluesky to end the session.</li>
+      <li>The page only reads from Bluesky. It never posts, likes, follows, blocks or changes anything on your account.</li>
+      <li>To look things up, your browser talks directly to Bluesky's servers and to plc.directory, the public directory of Bluesky accounts. The page's fonts load from Google Fonts. Those services see ordinary web requests from your browser, as with any site.</li>
+      <li>Anyone who can use this browser profile while you're signed in can use the page as you. You can cut off access at any time by deleting the app password in <a href="https://bsky.app/settings/app-passwords" target="_blank" rel="noopener">Bluesky's settings</a>.</li>
+    </ul>
+  </details>
 </div>
 
 <script>
@@ -208,10 +228,22 @@ async function resolveActor(handleOrDid) {
 }
 
 // ---------- session ----------
-function saveSession() { try { session ? sessionStorage.setItem(SKEY, JSON.stringify(session)) : sessionStorage.removeItem(SKEY); } catch {} }
-function loadSession() { try { return JSON.parse(sessionStorage.getItem(SKEY) || "null"); } catch { return null; } }
+// The app password is never stored. Only Bluesky's session tokens are kept:
+// in localStorage when "Keep me signed in" is checked, otherwise in sessionStorage (cleared when the tab closes).
+function store(kind) { try { return kind === "local" ? localStorage : sessionStorage; } catch { return null; } }
+function saveSession() {
+  for (const k of ["local", "session"]) { try { store(k)?.removeItem(SKEY); } catch {} }
+  if (!session) return;
+  try { store(session.remember ? "local" : "session")?.setItem(SKEY, JSON.stringify(session)); } catch {}
+}
+function loadSession() {
+  for (const k of ["local", "session"]) {
+    try { const s = JSON.parse(store(k)?.getItem(SKEY) || "null"); if (s?.refreshJwt) return s; } catch {}
+  }
+  return null;
+}
 
-async function login(id, pw) {
+async function login(id, pw, remember) {
   let ident = id.trim().replace(/^@/, "");
   if (!ident.startsWith("did:") && !ident.includes(".")) ident += ".bsky.social";
   let did;
@@ -221,7 +253,7 @@ async function login(id, pw) {
     const s = await getJSON(`${pds}/xrpc/com.atproto.server.createSession`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ identifier: ident, password: pw.trim() }),
     });
-    session = { did: s.did, handle: s.handle, pds, accessJwt: s.accessJwt, refreshJwt: s.refreshJwt };
+    session = { did: s.did, handle: s.handle, pds, accessJwt: s.accessJwt, refreshJwt: s.refreshJwt, remember: !!remember };
     saveSession();
   } catch (e) {
     if (e.code === "AuthFactorTokenRequired") throw new Error("This account uses two-factor sign-in. Create an app password in Bluesky settings and use that instead.");
@@ -230,15 +262,43 @@ async function login(id, pw) {
     throw e;
   }
 }
-async function refresh() {
-  try {
-    const s = await getJSON(`${session.pds}/xrpc/com.atproto.server.refreshSession`, { method: "POST", headers: { Authorization: `Bearer ${session.refreshJwt}` } });
-    session.accessJwt = s.accessJwt; session.refreshJwt = s.refreshJwt; saveSession();
-  } catch { session = null; saveSession(); renderAccount(); throw new Error("Your sign-in expired. Sign in again."); }
+let refreshing = null;
+function refresh() {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    try {
+      const s = await getJSON(`${session.pds}/xrpc/com.atproto.server.refreshSession`, { method: "POST", headers: { Authorization: `Bearer ${session.refreshJwt}` } });
+      session.accessJwt = s.accessJwt; session.refreshJwt = s.refreshJwt;
+      if (s.handle) session.handle = s.handle;
+      saveSession(); renderAccount();
+    } catch (e) {
+      // Only drop the sign-in when Bluesky rejects the token, not on a network hiccup.
+      if (e.status === 400 || e.status === 401) {
+        session = null; saveSession(); renderAccount();
+        throw new Error("Your sign-in has expired or the app password was revoked. Sign in again.");
+      }
+      throw e;
+    } finally { refreshing = null; }
+  })();
+  return refreshing;
 }
+
+async function logout() {
+  const s = session;
+  session = null; saveSession(); renderAccount();
+  blockCache.clear();
+  // Tell Bluesky to end this session so the stored tokens stop working everywhere.
+  if (s) { try { await fetch(`${s.pds}/xrpc/com.atproto.server.deleteSession`, { method: "POST", headers: { Authorization: `Bearer ${s.refreshJwt}` } }); } catch {} }
+}
+
 function renderAccount() {
   $("#signedOut").hidden = !!session; $("#signedIn").hidden = !session;
-  if (session) $("#meHandle").textContent = "@" + session.handle;
+  if (session) {
+    $("#meHandle").textContent = "@" + session.handle;
+    $("#keptNote").textContent = session.remember
+      ? "You'll stay signed in on this browser until you sign out."
+      : "You'll be signed out when you close this tab.";
+  }
 }
 
 // ---------- profiles & block direction ----------
@@ -491,20 +551,29 @@ $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const errEl = $("#loginErr"); errEl.hidden = true; $("#loginBtn").disabled = true;
   try {
-    await login($("#loginId").value, $("#loginPw").value);
+    await login($("#loginId").value, $("#loginPw").value, $("#remember").checked);
     $("#loginPw").value = "";
     renderAccount();
     if ($("#postUrl").value.trim()) inspect($("#postUrl").value);
   } catch (err) { errEl.textContent = err.message; errEl.hidden = false; }
   finally { $("#loginBtn").disabled = false; }
 });
-$("#logoutBtn").addEventListener("click", () => { session = null; saveSession(); renderAccount(); });
+$("#logoutBtn").addEventListener("click", async () => {
+  $("#logoutBtn").disabled = true;
+  await logout();
+  $("#logoutBtn").disabled = false;
+  if ($("#out .thread")) inspect($("#postUrl").value);
+});
 $("#threadForm").addEventListener("submit", (e) => { e.preventDefault(); inspect($("#postUrl").value); });
 
-session = loadSession();
-renderAccount();
-const u = new URLSearchParams(location.search).get("u");
-if (u) { $("#postUrl").value = u; inspect(u); }
+(async () => {
+  session = loadSession();
+  renderAccount();
+  // Confirm a saved sign-in still works (and get fresh tokens) before loading anything.
+  if (session) { try { await refresh(); } catch {} }
+  const u = new URLSearchParams(location.search).get("u");
+  if (u) { $("#postUrl").value = u; inspect(u); }
+})();
 </script>
 </body>
 </html>
